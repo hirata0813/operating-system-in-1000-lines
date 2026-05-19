@@ -5,7 +5,8 @@ typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 typedef uint32_t size_t;
 
-extern char __bss[], __bss_end[], __stack_top[];
+extern char __bss[], __bss_end[], __stack_top[]; // リンカスクリプトで定義されているシンボル
+extern char __free_ram[], __free_ram_end[];
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid) {
@@ -125,16 +126,29 @@ void handle_trap(struct trap_frame *f) {
     PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
 }
 
+// n ページ分のメモリを動的に割り当て，その先頭アドレスを返す
+// この関数は，ページ単位でメモリを割り当てる．1ページは 4096 バイト
+paddr_t alloc_pages(uint32_t n) {
+    static paddr_t next_paddr = (paddr_t) __free_ram; // 次に割り当てられる空き領域の先頭アドレスを指す変数．関数呼び出し間で値が保持される
+    paddr_t paddr = next_paddr;
+    next_paddr += n * PAGE_SIZE;
+
+    if (next_paddr > (paddr_t) __free_ram_end)
+        PANIC("out of memory");
+
+    memset((void *) paddr, 0, n * PAGE_SIZE);
+    return paddr;
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
 
-    // RISC-V では，例外が発生した時，stvec レジスタに書いてあるアドレスにジャンプする．そのため，stvec に例外ハンドラのアドレスをセットしておく
-    WRITE_CSR(stvec, (uint32_t) kernel_entry);
-    __asm__ __volatile__("unimp");
+    paddr_t paddr0 = alloc_pages(2);
+    paddr_t paddr1 = alloc_pages(1);
+    printf("alloc_pages test: paddr0=%x\n", paddr0);
+    printf("alloc_pages test: paddr1=%x\n", paddr1);
 
-    for (;;) {
-        __asm__ __volatile__("wfi");
-    }
+    PANIC("booted!");
 }
 
 __attribute__((section(".text.boot")))
