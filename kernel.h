@@ -63,3 +63,16 @@ struct trap_frame {
         uint32_t __tmp = (value);                                              \
         __asm__ __volatile__("csrw " #reg ", %0" ::"r"(__tmp));                \
     } while (0)
+
+#define PROCS_MAX 8       // 最大プロセス数
+
+#define PROC_UNUSED   0   // 未使用のプロセス管理構造体
+#define PROC_RUNNABLE 1   // 実行可能なプロセス
+
+struct process {
+    int pid;             // プロセスID
+    int state;           // プロセスの状態: PROC_UNUSED または PROC_RUNNABLE
+    vaddr_t sp;          // コンテキストスイッチ時のスタックポインタ
+    uint8_t stack[8192]; // カーネルスタック(コンテキストスイッチ時の CPU レジスタ，関数の戻り先などプロセスのコンテキストを格納)
+                         //   さらに，プロセス内で利用するローカル変数や関数呼び出し時の引数(シスプロで習ったようなこと)もここに格納される
+};

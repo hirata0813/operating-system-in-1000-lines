@@ -140,13 +140,137 @@ paddr_t alloc_pages(uint32_t n) {
     return paddr;
 }
 
+void delay(void) {
+    for (int i = 0; i < 30000000; i++)
+        __asm__ __volatile__("nop"); // 何もしない命令
+}
+
+
+struct process procs[PROCS_MAX];
+
+// コンテキストスイッチを行う．
+// prev_sp: 切り替え前プロセスの sp
+// next_sp: 次に動作するプロセスの sp
+__attribute__((naked)) void switch_context(uint32_t *prev_sp,
+                                           uint32_t *next_sp) {
+    __asm__ __volatile__(
+        // 実行中プロセスのスタックへレジスタを保存
+        // 実際には，CPU のレジスタは全プロセスで共通なので，実行プロセスの切替時には，実行コンテキストをメモリに退避させておく必要がある
+        // AI によると，RISC-V では汎用レジスタが32本あるが，その呼び出し規約的には，caller-save(呼び出し側が保存すべきレジスタ) レジスタが13本なので，13本だけ保存するようにコンテキストスイッチしている
+        "addi sp, sp, -13 * 4\n" // ここで $sp が指しているのは，switch_context() を呼び出したプロセスのスタック
+        "sw ra,  0  * 4(sp)\n"
+        "sw s0,  1  * 4(sp)\n"
+        "sw s1,  2  * 4(sp)\n"
+        "sw s2,  3  * 4(sp)\n"
+        "sw s3,  4  * 4(sp)\n"
+        "sw s4,  5  * 4(sp)\n"
+        "sw s5,  6  * 4(sp)\n"
+        "sw s6,  7  * 4(sp)\n"
+        "sw s7,  8  * 4(sp)\n"
+        "sw s8,  9  * 4(sp)\n"
+        "sw s9,  10 * 4(sp)\n"
+        "sw s10, 11 * 4(sp)\n"
+        "sw s11, 12 * 4(sp)\n"
+
+        // スタックポインタの更新&切り替え(これが実質的なプロセス切り替え)
+        // a0 は prev_sp，a1 は next_sp が入っている
+        "sw sp, (a0)\n" // *prev_sp = sp と同じ．現在のプロセスのスタック位置を保存する．prev_sp はアドレスとして与えられているので，ここでプロセス構造体の sp メンバの値が更新される
+        "lw sp, (a1)\n" // sp = *next_sp と同じ．次のプロセスのスタック位置を読み込む
+
+        // 次のプロセスのスタックからレジスタを復元
+        "lw ra,  0  * 4(sp)\n"
+        "lw s0,  1  * 4(sp)\n"
+        "lw s1,  2  * 4(sp)\n"
+        "lw s2,  3  * 4(sp)\n"
+        "lw s3,  4  * 4(sp)\n"
+        "lw s4,  5  * 4(sp)\n"
+        "lw s5,  6  * 4(sp)\n"
+        "lw s6,  7  * 4(sp)\n"
+        "lw s7,  8  * 4(sp)\n"
+        "lw s8,  9  * 4(sp)\n"
+        "lw s9,  10 * 4(sp)\n"
+        "lw s10, 11 * 4(sp)\n"
+        "lw s11, 12 * 4(sp)\n"
+        "addi sp, sp, 13 * 4\n"
+        "ret\n" // j ra と同じ．次のプロセスのスタックから復元した ra レジスタの値にジャンプすることになる
+    );
+}
+
+// プロセスの初期化処理を行う．具体的には，実行開始アドレスを受け取り，プロセス管理構造体を初期化して返す
+struct process *create_process(uint32_t pc) {
+    // 空いているプロセス管理構造体を探す
+    struct process *proc = NULL;
+    int i;
+    for (i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_UNUSED) {
+            proc = &procs[i];
+            break;
+        }
+    }
+
+    if (!proc)
+        PANIC("no free process slots");
+
+    // switch_context() で復帰できるように、スタックに呼び出し先保存レジスタを積む
+    // プロセス管理構造体の stack には，レジスタの途中状態やプロセス内で利用するローカル変数，関数呼び出し時の引数の情報など格納
+    // 各プロセスが持つ sp の初期値は，stack の先頭からではなく，stack の最後からになる．なぜなら，スタックは，低アドレスに向かって伸びていくから
+    uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
+    printf("initializing process stack for PID:%d, stack top = %x\n", i + 1, (uint32_t) sp);
+    *--sp = 0;                      // s11
+    printf("initializing process stack for PID:%d, stack top = %x\n", i + 1, (uint32_t) sp);
+    *--sp = 0;                      // s10
+    *--sp = 0;                      // s9
+    *--sp = 0;                      // s8
+    *--sp = 0;                      // s7
+    *--sp = 0;                      // s6
+    *--sp = 0;                      // s5
+    *--sp = 0;                      // s4
+    *--sp = 0;                      // s3
+    *--sp = 0;                      // s2
+    *--sp = 0;                      // s1
+    *--sp = 0;                      // s0
+    *--sp = (uint32_t) pc;          // ra
+
+    // 各フィールドを初期化
+    proc->pid = i + 1;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t) sp;
+    printf("created process PID:%d with stack pointer %x\n", proc->pid, proc->sp);
+    return proc;
+}
+
+struct process *proc_a;
+struct process *proc_b;
+
+void proc_a_entry(void) {
+    printf("starting process A. sp = %x\n", proc_a->sp);
+    while (1) {
+        //putchar('A');
+        printf("switching from process A to B. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
+        //printf("A $ra = %x, B $ra = %x\n", *((uint32_t *)((char *)proc_a->sp + 4)), *((uint32_t *)((char *)proc_b->sp + 4)));
+        switch_context(&proc_a->sp, &proc_b->sp);
+        delay();
+    }
+}
+
+void proc_b_entry(void) {
+    printf("starting process B. sp = %x\n", proc_b->sp);
+    while (1) {
+        //putchar('B');
+        printf("switching from process B to A. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
+        //printf("B $ra = %x, A $ra = %x\n", *((uint32_t *)((char *)proc_a->sp + 4)), *((uint32_t *)((char *)proc_b->sp + 4)));
+        switch_context(&proc_b->sp, &proc_a->sp);
+        delay();
+    }
+}
+
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
-
-    paddr_t paddr0 = alloc_pages(2);
-    paddr_t paddr1 = alloc_pages(1);
-    printf("alloc_pages test: paddr0=%x\n", paddr0);
-    printf("alloc_pages test: paddr1=%x\n", paddr1);
+    WRITE_CSR(stvec, (uint32_t) kernel_entry);
+    proc_a = create_process((uint32_t) proc_a_entry);
+    proc_b = create_process((uint32_t) proc_b_entry);
+    proc_a_entry();
 
     PANIC("booted!");
 }
