@@ -192,6 +192,7 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
         "lw s10, 11 * 4(sp)\n"
         "lw s11, 12 * 4(sp)\n"
         "addi sp, sp, 13 * 4\n"
+        //"sw sp, (a1)\n" // ここで sp を保存すると，より最新のスタック状態を保持する実装となる
         "ret\n" // j ra と同じ．次のプロセスのスタックから復元した ra レジスタの値にジャンプすることになる
     );
 }
@@ -239,16 +240,44 @@ struct process *create_process(uint32_t pc) {
     return proc;
 }
 
+struct process *current_proc; // 現在実行中のプロセス
+struct process *idle_proc;    // アイドルプロセス
+
+void yield(void) {
+    // 実行可能なプロセスを探す
+    struct process *next = idle_proc;
+    for (int i = 0; i < PROCS_MAX; i++) {
+        // 現在実行中のプロセスの次のプロセスから順番に、実行可能なプロセスを探す。見つかったら、そのプロセスを次の実行プロセスとして選ぶ
+        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+        printf("checking process PID:%d, state=%d\n", proc->pid, proc->state);
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+            next = proc;
+            break;
+        }
+    }
+
+    // 現在実行中のプロセス以外に、実行可能なプロセスがない。戻って処理を続行する
+    if (next == current_proc)
+        return;
+
+    // コンテキストスイッチ
+    // 現在動いているプロセスを prev，次に動かすプロセスを next として，switch_context() を呼び出す
+    struct process *prev = current_proc;
+    current_proc = next;
+    switch_context(&prev->sp, &next->sp);
+}
+
+
 struct process *proc_a;
 struct process *proc_b;
 
 void proc_a_entry(void) {
     printf("starting process A. sp = %x\n", proc_a->sp);
     while (1) {
-        //putchar('A');
-        printf("switching from process A to B. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
+        putchar('A');
+        //printf("switching from process A to B. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
         //printf("A $ra = %x, B $ra = %x\n", *((uint32_t *)((char *)proc_a->sp + 4)), *((uint32_t *)((char *)proc_b->sp + 4)));
-        switch_context(&proc_a->sp, &proc_b->sp);
+        yield();
         delay();
     }
 }
@@ -256,23 +285,27 @@ void proc_a_entry(void) {
 void proc_b_entry(void) {
     printf("starting process B. sp = %x\n", proc_b->sp);
     while (1) {
-        //putchar('B');
-        printf("switching from process B to A. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
+        putchar('B');
+        //printf("switching from process B to A. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
         //printf("B $ra = %x, A $ra = %x\n", *((uint32_t *)((char *)proc_a->sp + 4)), *((uint32_t *)((char *)proc_b->sp + 4)));
-        switch_context(&proc_b->sp, &proc_a->sp);
+        yield();
         delay();
     }
 }
 
-
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
+    idle_proc = create_process((uint32_t) NULL);
+    idle_proc->pid = 0; // idle
+    current_proc = idle_proc;
+
     proc_a = create_process((uint32_t) proc_a_entry);
     proc_b = create_process((uint32_t) proc_b_entry);
-    proc_a_entry();
 
-    PANIC("booted!");
+    yield();
+    PANIC("switched to idle process");
 }
 
 __attribute__((section(".text.boot")))
