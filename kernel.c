@@ -35,12 +35,28 @@ void putchar(char ch) {
 
 // kernel_entry 関数の先頭アドレスを，stvec レジスタ(例外ハンドラのアドレスを示すレジスタ)に後ほどセットする
 // 最初に，sscratch レジスタ(カーネルが自由に使えるレジスタ)を用いて，例外発生時のスタックポインタを保存しておく(ユーザランドプログラムなどが使っていたローカル変数などの状態を保存しておくため)
+// プロセスごとにカーネルスタックを持っているため，例外発生時には，実行中プロセスのカーネルスタックを sscratch レジスタから取り出して，sp レジスタにセットする必要がある
 // pc などの保存は，RISC-V では CPU が自動でやってくれるが，スタックの保存は自分でやる必要がある
+
+/* 8章と10章の例外ハンドラの実装の違い
+    8章
+        sp: 例外発生時のスタック(そのままずらして退避領域に使う) 
+        sscratch: sp の保存場所(ここが安全な領域だと信じている)
+    10章
+        最初に，sp と sscratch を入れ替えている．入れ替え後は，以下の役目を担う
+        sp: 実行中プロセスのカーネルスタックのアドレス(プロセス生成時に用意された安全領域)
+        sscratch: 例外発生時のスタック
+    一言で言うと，例外発生時のレジスタ保存領域を，安全な場所にした，という違いがある
+*/
+
 __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) {
     __asm__ __volatile__(
-        "csrw sscratch, sp\n"
+        // sscratch: 例外発生時のスタックポインタが入る
+        // sp: 実行中プロセスのカーネルスタックのアドレスが入る
+        "csrrw sp, sscratch, sp\n"
+
         "addi sp, sp, -4 * 31\n"
         "sw ra,  4 * 0(sp)\n"
         "sw gp,  4 * 1(sp)\n"
@@ -76,6 +92,10 @@ void kernel_entry(void) {
         // sscratch は後に別用途で使うので，元の sp をスタックに保存する
         "csrr a0, sscratch\n"
         "sw a0, 4 * 30(sp)\n"
+
+        // カーネルスタックを設定し直す
+        "addi a0, sp, 4 * 31\n"
+        "csrw sscratch, a0\n"
 
         // a0 レジスタに，trap_frame 構造体(ここでは，上の行で保存しておいた各レジスタの状態)の先頭アドレスを代入して，handle_trap 関数を呼び出す
         "mv a0, sp\n"
@@ -259,6 +279,13 @@ void yield(void) {
     // 現在実行中のプロセス以外に、実行可能なプロセスがない。戻って処理を続行する
     if (next == current_proc)
         return;
+
+    // 次に動かすプロセスのカーネルスタックの初期値を，sscratch レジスタに設定
+    __asm__ __volatile__(
+        "csrw sscratch, %[sscratch]\n"
+        :
+        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    );
 
     // コンテキストスイッチ
     // 現在動いているプロセスを prev，次に動かすプロセスを next として，switch_context() を呼び出す
