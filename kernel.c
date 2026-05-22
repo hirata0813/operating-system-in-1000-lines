@@ -320,6 +320,32 @@ void proc_b_entry(void) {
     }
 }
 
+// 1段目のページテーブル(table1)，マップしたい仮想アドレス(vaddr)，マップ先の物理アドレス(paddr)，ページテーブルエントリに設定するフラグ(flags)を受け取り，ページテーブルを構築する
+// vaddr と paddr の対応を1エントリ登録する
+// table1[vpn1] は，第2レベルテーブルのPPN(物理メモリ全体を4KBで区切ったときに，何番目のページになるか)と，第2レベルテーブルが作成されているかどうかを表すビット(0bit目)が入っている．
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+    // ページサイズが 4KB なので，vaddr，paddr ともに 4KB 単位である必要がある
+    if (!is_aligned(vaddr, PAGE_SIZE))
+        PANIC("unaligned vaddr %x", vaddr);
+
+    if (!is_aligned(paddr, PAGE_SIZE))
+        PANIC("unaligned paddr %x", paddr);
+
+    // まず，第2レベルテーブルという空の入れ物を用意して，table1[vpn1] からそこへの道案内を登録
+    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
+    if ((table1[vpn1] & PAGE_V) == 0) { // table1[vpn1]の0bit目を見て，第2レベルテーブルが存在するか確認
+        uint32_t pt_paddr = alloc_pages(1);
+        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V; // 10bit 目以降に PPN をセットして，フラグを立てる
+    }
+
+    // 次に，第2レベルテーブルに，中身(仮想->物理の対応エントリ)を追加
+    uint32_t vpn0 = (vaddr >> 12) & 0x3ff; // vaddr の 12～21bitを取り出す
+    uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE); // table1[vpn1]から PPN を取り出して，第2レベルテーブルの先頭アドレスに変換する
+    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V; // table0[vpn0]の10bit目以降に PPN をセット，下位10bitにフラグを詰め込む
+
+    // 中盤のPPNと最後のPPNは意味が異なる．中盤の方は，第2レベルテーブルを指すページ番号で，最後の方は，物理アドレスに変換するためのPPN
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);

@@ -14,7 +14,7 @@ typedef uint32_t vaddr_t;
 // __builtin_ で始まる関数は，clang が提供するビルトイン関数．
 // clang 自身が関数の処理や意味を知っていて，コンパイル時に特別なコードを生成してくれる．
 #define align_up(value, align)   __builtin_align_up(value, align)
-#define is_aligned(value, align) __builtin_is_aligned(value, align)
+#define is_aligned(value, align) __builtin_is_aligned(value, align) // value が align の倍数であるかどうかを判定
 #define offsetof(type, member)   __builtin_offsetof(type, member)
 #define va_list  __builtin_va_list
 #define va_start __builtin_va_start
