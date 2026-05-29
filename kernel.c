@@ -217,6 +217,8 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
     );
 }
 
+extern char __kernel_base[];
+
 // プロセスの初期化処理を行う．具体的には，実行開始アドレスを受け取り，プロセス管理構造体を初期化して返す
 struct process *create_process(uint32_t pc) {
     // 空いているプロセス管理構造体を探す
@@ -236,9 +238,7 @@ struct process *create_process(uint32_t pc) {
     // プロセス管理構造体の stack には，レジスタの途中状態やプロセス内で利用するローカル変数，関数呼び出し時の引数の情報など格納
     // 各プロセスが持つ sp の初期値は，stack の先頭からではなく，stack の最後からになる．なぜなら，スタックは，低アドレスに向かって伸びていくから
     uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
-    printf("initializing process stack for PID:%d, stack top = %x\n", i + 1, (uint32_t) sp);
     *--sp = 0;                      // s11
-    printf("initializing process stack for PID:%d, stack top = %x\n", i + 1, (uint32_t) sp);
     *--sp = 0;                      // s10
     *--sp = 0;                      // s9
     *--sp = 0;                      // s8
@@ -252,11 +252,19 @@ struct process *create_process(uint32_t pc) {
     *--sp = 0;                      // s0
     *--sp = (uint32_t) pc;          // ra
 
+    uint32_t *page_table = (uint32_t *) alloc_pages(1);
+
+    // カーネルのページを各プロセスのページテーブルにもマッピングする
+    // この理由は，例外発生時などには，ユーザモードプロセスのページテーブルを用いてカーネルのコードにアクセスする必要があるから
+    for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
+        map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+
     // 各フィールドを初期化
     proc->pid = i + 1;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
-    printf("created process PID:%d with stack pointer %x\n", proc->pid, proc->sp);
+    proc->page_table = page_table;
+    printf("PID %d page_table top addr: %x\n", proc->pid, proc->page_table);
     return proc;
 }
 
@@ -269,7 +277,6 @@ void yield(void) {
     for (int i = 0; i < PROCS_MAX; i++) {
         // 現在実行中のプロセスの次のプロセスから順番に、実行可能なプロセスを探す。見つかったら、そのプロセスを次の実行プロセスとして選ぶ
         struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
-        printf("checking process PID:%d, state=%d\n", proc->pid, proc->state);
         if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
             next = proc;
             break;
@@ -281,10 +288,17 @@ void yield(void) {
         return;
 
     // 次に動かすプロセスのカーネルスタックの初期値を，sscratch レジスタに設定
+    // satp レジスタは，「どのページテーブルを使うか」を CPU に伝えるレジスタ
+    // また，Sv32 モードでページングを行うことを示すレジスタでもある
     __asm__ __volatile__(
+        "sfence.vma\n"
+        "csrw satp, %[satp]\n"
+        "sfence.vma\n"
         "csrw sscratch, %[sscratch]\n"
         :
-        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+        // ページテーブルの切り替え
+        : [satp] "r" (SATP_SV32 | ((uint32_t) next->page_table / PAGE_SIZE)),
+          [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
     );
 
     // コンテキストスイッチ
@@ -299,22 +313,16 @@ struct process *proc_a;
 struct process *proc_b;
 
 void proc_a_entry(void) {
-    printf("starting process A. sp = %x\n", proc_a->sp);
     while (1) {
-        putchar('A');
-        //printf("switching from process A to B. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
-        //printf("A $ra = %x, B $ra = %x\n", *((uint32_t *)((char *)proc_a->sp + 4)), *((uint32_t *)((char *)proc_b->sp + 4)));
+        //putchar('A');
         yield();
         delay();
     }
 }
 
 void proc_b_entry(void) {
-    printf("starting process B. sp = %x\n", proc_b->sp);
     while (1) {
-        putchar('B');
-        //printf("switching from process B to A. A sp = %x, B sp = %x\n", proc_a->sp, proc_b->sp);
-        //printf("B $ra = %x, A $ra = %x\n", *((uint32_t *)((char *)proc_a->sp + 4)), *((uint32_t *)((char *)proc_b->sp + 4)));
+        //putchar('B');
         yield();
         delay();
     }

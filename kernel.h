@@ -75,6 +75,7 @@ struct process {
     vaddr_t sp;          // コンテキストスイッチ時のスタックポインタ
     uint8_t stack[8192]; // カーネルスタック(コンテキストスイッチ時の CPU レジスタ，関数の戻り先などプロセスのコンテキストを格納)
                          //   さらに，プロセス内で利用するローカル変数や関数呼び出し時の引数(シスプロで習ったようなこと)もここに格納される
+    uint32_t *page_table;
 };
 
 // 1 << n は，1をnビット左にずらすという意味で，例えば，1 << 3 は 0b00001000 = 0x08 となり，3ビット目が1となる．
@@ -84,3 +85,6 @@ struct process {
 #define PAGE_W    (1 << 2)   // 書き込み可能
 #define PAGE_X    (1 << 3)   // 実行可能
 #define PAGE_U    (1 << 4)   // ユーザーモードでアクセス可能
+
+// プロトタイプ宣言
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
