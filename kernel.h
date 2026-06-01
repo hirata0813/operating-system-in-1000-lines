@@ -86,5 +86,10 @@ struct process {
 #define PAGE_X    (1 << 3)   // 実行可能
 #define PAGE_U    (1 << 4)   // ユーザーモードでアクセス可能
 
+// ユーザランドのアプリケーションは，必ず0x01000000から展開するようにする
+#define USER_BASE 0x1000000
+
+#define SSTATUS_SPIE (1 << 5)
+
 // プロトタイプ宣言
 void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);

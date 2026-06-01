@@ -7,6 +7,7 @@ typedef uint32_t size_t;
 
 extern char __bss[], __bss_end[], __stack_top[]; // リンカスクリプトで定義されているシンボル
 extern char __free_ram[], __free_ram_end[];
+extern char _binary_shell_bin_start[], _binary_shell_bin_size[]; // shell.bin.o に入っているシンボル
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid) {
@@ -219,8 +220,21 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
 
 extern char __kernel_base[];
 
-// プロセスの初期化処理を行う．具体的には，実行開始アドレスを受け取り，プロセス管理構造体を初期化して返す
-struct process *create_process(uint32_t pc) {
+// sret 命令(1つ下の権限レベルのモードに遷移する命令)でユーザモードに移行してユーザプログラムを実行
+// sret 命令実行時は，sepc レジスタの値が pc にセットされ，モード移行後はそこから実行される
+__attribute__((naked)) void user_entry(void) {
+    __asm__ __volatile__(
+        "csrw sepc, %[sepc]\n"
+        "csrw sstatus, %[sstatus]\n"
+        "sret\n"
+        :
+        : [sepc] "r" (USER_BASE),
+          [sstatus] "r" (SSTATUS_SPIE)
+    );
+}
+
+// 実行イメージへのポインタとイメージサイズを受け取り，プロセスの初期化処理を行う．
+struct process *create_process(const void *image, size_t image_size) {
     // 空いているプロセス管理構造体を探す
     struct process *proc = NULL;
     int i;
@@ -250,7 +264,7 @@ struct process *create_process(uint32_t pc) {
     *--sp = 0;                      // s2
     *--sp = 0;                      // s1
     *--sp = 0;                      // s0
-    *--sp = (uint32_t) pc;          // ra
+    *--sp = (uint32_t) user_entry;  // ra
 
     uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
@@ -259,12 +273,33 @@ struct process *create_process(uint32_t pc) {
     for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
         map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
 
+    // ページテーブルに，アプリの実行バイナリの仮想->物理の対応を登録する
+    // image_size が3ページ分であれば，以下のようになる
+    // エントリ1: 仮想 0x1000000 → 物理 0x80265000
+    // エントリ2: 仮想 0x1001000 → 物理 0x80266000
+    // エントリ3: 仮想 0x1002000 → 物理 0x80267000
+    // 先頭アドレスさえ対応付けておけば，あとは，CPU が順番に命令を拾って実行していってくれる
+    for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+        paddr_t page = alloc_pages(1);
+
+        // コピーするデータがページサイズより小さい場合を考慮
+        // https://github.com/nuta/operating-system-in-1000-lines/pull/27
+        size_t remaining = image_size - off;
+        size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
+
+        // 確保した物理ページに，実行イメージ(バイナリ)をコピー
+        memcpy((void *) page, image + off, copy_size);
+
+        // ページテーブルに，仮想アドレスと物理アドレスの対応をマッピング
+        // 物理アドレスは，上段で確保した物理ページのアドレス
+        map_page(page_table, USER_BASE + off, page,
+                 PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+    }
     // 各フィールドを初期化
     proc->pid = i + 1;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
     proc->page_table = page_table;
-    printf("PID %d page_table top addr: %x\n", proc->pid, proc->page_table);
     return proc;
 }
 
@@ -308,26 +343,6 @@ void yield(void) {
     switch_context(&prev->sp, &next->sp);
 }
 
-
-struct process *proc_a;
-struct process *proc_b;
-
-void proc_a_entry(void) {
-    while (1) {
-        //putchar('A');
-        yield();
-        delay();
-    }
-}
-
-void proc_b_entry(void) {
-    while (1) {
-        //putchar('B');
-        yield();
-        delay();
-    }
-}
-
 // 1段目のページテーブル(table1)，マップしたい仮想アドレス(vaddr)，マップ先の物理アドレス(paddr)，ページテーブルエントリに設定するフラグ(flags)を受け取り，ページテーブルを構築する
 // vaddr と paddr の対応を1エントリ登録する
 // table1[vpn1] は，第2レベルテーブルのPPN(物理メモリ全体を4KBで区切ったときに，何番目のページになるか)と，第2レベルテーブルが作成されているかどうかを表すビット(0bit目)が入っている．
@@ -358,13 +373,11 @@ void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
-    idle_proc = create_process((uint32_t) NULL);
+    idle_proc = create_process(NULL, 0);
     idle_proc->pid = 0; // idle
     current_proc = idle_proc;
 
-    proc_a = create_process((uint32_t) proc_a_entry);
-    proc_b = create_process((uint32_t) proc_b_entry);
-
+    create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
     yield();
     PANIC("switched to idle process");
 }
