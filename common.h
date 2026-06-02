@@ -28,3 +28,6 @@ int strcmp(const char *s1, const char *s2);
 void printf(const char *fmt, ...);
 
 #define PAGE_SIZE 4096
+
+// システムコール識別子
+#define SYS_PUTCHAR 1

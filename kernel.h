@@ -93,3 +93,7 @@ struct process {
 
 // プロトタイプ宣言
 void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
+void handle_syscall(struct trap_frame *f);
+
+// 例外の識別子(例外ハンドラの実装で利用)
+#define SCAUSE_ECALL 8 // Environment call from U-mode
