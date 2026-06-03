@@ -68,6 +68,7 @@ struct trap_frame {
 
 #define PROC_UNUSED   0   // 未使用のプロセス管理構造体
 #define PROC_RUNNABLE 1   // 実行可能なプロセス
+#define PROC_EXITED   2   // 終了したプロセス
 
 struct process {
     int pid;             // プロセスID
@@ -94,6 +95,7 @@ struct process {
 // プロトタイプ宣言
 void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
 void handle_syscall(struct trap_frame *f);
+void yield(void);
 
 // 例外の識別子(例外ハンドラの実装で利用)
 #define SCAUSE_ECALL 8 // Environment call from U-mode

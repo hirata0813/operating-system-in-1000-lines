@@ -31,3 +31,5 @@ void printf(const char *fmt, ...);
 
 // システムコール識別子
 #define SYS_PUTCHAR 1
+#define SYS_GETCHAR 2
+#define SYS_EXIT    3

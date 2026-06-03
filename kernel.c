@@ -9,6 +9,9 @@ extern char __bss[], __bss_end[], __stack_top[]; // リンカスクリプトで�
 extern char __free_ram[], __free_ram_end[];
 extern char _binary_shell_bin_start[], _binary_shell_bin_size[]; // shell.bin.o に入っているシンボル
 
+struct process *current_proc; // 現在実行中のプロセス
+struct process *idle_proc;    // アイドルプロセス
+
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid) {
     register long a0 __asm__("a0") = arg0; // 指定したレジスタに値を入れる命令
@@ -32,6 +35,13 @@ struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
 
 void putchar(char ch) {
     sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+}
+
+// getchar は1文字読んだら返る
+// 文字が入力されない場合も即座に返る
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
 }
 
 // kernel_entry 関数の先頭アドレスを，stvec レジスタ(例外ハンドラのアドレスを示すレジスタ)に後ほどセットする
@@ -157,6 +167,24 @@ void handle_trap(struct trap_frame *f) {
 
 void handle_syscall(struct trap_frame *f) {
     switch (f->a3) {
+        case SYS_EXIT:
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable"); // exit したプロセスはここには来ない(はず)
+        case SYS_GETCHAR:
+            // ここの while は，1文字入力されたら break する
+            while (1) {
+                // getchar は，文字が入力されようがされまいが即座に返る
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+
+                yield();
+            }
+            break;
         case SYS_PUTCHAR:
             putchar(f->a0);
             break;
@@ -320,9 +348,6 @@ struct process *create_process(const void *image, size_t image_size) {
     proc->page_table = page_table;
     return proc;
 }
-
-struct process *current_proc; // 現在実行中のプロセス
-struct process *idle_proc;    // アイドルプロセス
 
 void yield(void) {
     // 実行可能なプロセスを探す
