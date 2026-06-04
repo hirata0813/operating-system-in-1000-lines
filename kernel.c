@@ -12,6 +12,23 @@ extern char _binary_shell_bin_start[], _binary_shell_bin_size[]; // shell.bin.o 
 struct process *current_proc; // 現在実行中のプロセス
 struct process *idle_proc;    // アイドルプロセス
 
+// virtio デバイスの MMIO 上レジスタを操作する関数群
+uint32_t virtio_reg_read32(unsigned offset) {
+    return *((volatile uint32_t *) (VIRTIO_BLK_PADDR + offset));
+}
+
+uint64_t virtio_reg_read64(unsigned offset) {
+    return *((volatile uint64_t *) (VIRTIO_BLK_PADDR + offset));
+}
+
+void virtio_reg_write32(unsigned offset, uint32_t value) {
+    *((volatile uint32_t *) (VIRTIO_BLK_PADDR + offset)) = value;
+}
+
+void virtio_reg_fetch_and_or32(unsigned offset, uint32_t value) {
+    virtio_reg_write32(offset, virtio_reg_read32(offset) | value);
+}
+
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid) {
     register long a0 __asm__("a0") = arg0; // 指定したレジスタに値を入れる命令
@@ -171,7 +188,7 @@ void handle_syscall(struct trap_frame *f) {
             printf("process %d exited\n", current_proc->pid);
             current_proc->state = PROC_EXITED;
             yield();
-            PANIC("unreachable"); // exit したプロセスはここには来ない(はず)
+            PANIC("unreachable"); // exit したプロセスはここには来ない(はず)が，メモリ上には展開されたまま
         case SYS_GETCHAR:
             // ここの while は，1文字入力されたら break する
             while (1) {
@@ -319,6 +336,9 @@ struct process *create_process(const void *image, size_t image_size) {
     for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
         map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
 
+    // virtio ブロックデバイスの MMIO 領域をマッピング
+    map_page(page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W);
+
     // ページテーブルに，アプリの実行バイナリの仮想->物理の対応を登録する
     // image_size が3ページ分であれば，以下のようになる
     // エントリ1: 仮想 0x1000000 → 物理 0x80265000
@@ -412,9 +432,135 @@ void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
     // 中盤のPPNと最後のPPNは意味が異なる．中盤の方は，第2レベルテーブルを指すページ番号で，最後の方は，物理アドレスに変換するためのPPN
 }
 
+struct virtio_virtq *blk_request_vq;
+struct virtio_blk_req *blk_req;
+paddr_t blk_req_paddr;
+uint64_t blk_capacity;
+
+void virtio_blk_init(void) {
+    if (virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976)
+        PANIC("virtio: invalid magic value");
+    if (virtio_reg_read32(VIRTIO_REG_VERSION) != 1)
+        PANIC("virtio: invalid version");
+    if (virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK)
+        PANIC("virtio: invalid device id");
+
+    // 1. デバイスをリセット
+    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0);
+    // 2. ACKNOWLEDGEステータスビットを設定: デバイスを認識した
+    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
+    // 3. DRIVERステータスビットを設定: デバイスの使い方を知っている
+    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
+    // ページサイズを設定: 4KBページを使用。PFN (ページフレーム番号) の計算に使われる
+    virtio_reg_write32(VIRTIO_REG_PAGE_SIZE, PAGE_SIZE);
+    // ディスク読み書き用のキューを初期化
+    blk_request_vq = virtq_init(0);
+    // 6. DRIVER_OKステータスビットを設定: デバイスが使用可能になった
+    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER_OK);
+
+    // ディスクの容量を取得
+    blk_capacity = virtio_reg_read64(VIRTIO_REG_DEVICE_CONFIG + 0) * SECTOR_SIZE;
+    printf("virtio-blk: capacity is %d bytes\n", (int)blk_capacity);
+
+    // デバイスへの処理要求を格納する領域を確保
+    blk_req_paddr = alloc_pages(align_up(sizeof(*blk_req), PAGE_SIZE) / PAGE_SIZE);
+    blk_req = (struct virtio_blk_req *) blk_req_paddr;
+}
+
+struct virtio_virtq *virtq_init(unsigned index) {
+    paddr_t virtq_paddr = alloc_pages(align_up(sizeof(struct virtio_virtq), PAGE_SIZE) / PAGE_SIZE);
+    struct virtio_virtq *vq = (struct virtio_virtq *) virtq_paddr;
+    vq->queue_index = index;
+    vq->used_index = (volatile uint16_t *) &vq->used.index;
+    // キューを選択: virtqueueのインデックスを書き込む (最初のキューは0)
+    virtio_reg_write32(VIRTIO_REG_QUEUE_SEL, index);
+    // キューサイズを指定: 使用するディスクリプタの数を書き込む
+    virtio_reg_write32(VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM);
+    // キューのページフレーム番号 (物理アドレスではない!) を書き込む
+    virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, virtq_paddr / PAGE_SIZE);
+    return vq;
+}
+
+// デバイスに新しいリクエストがあることを通知する。desc_indexは、新しいリクエストの
+// 先頭ディスクリプタのインデックス。
+void virtq_kick(struct virtio_virtq *vq, int desc_index) {
+    vq->avail.ring[vq->avail.index % VIRTQ_ENTRY_NUM] = desc_index;
+    vq->avail.index++;
+    __sync_synchronize();
+    virtio_reg_write32(VIRTIO_REG_QUEUE_NOTIFY, vq->queue_index);
+    vq->last_used_index++;
+}
+
+// デバイスが処理中のリクエストがあるかどうかを返す。
+bool virtq_is_busy(struct virtio_virtq *vq) {
+    return vq->last_used_index != *vq->used_index;
+}
+
+// virtio-blkデバイスの読み書き。
+// OS 側は，この関数だけ知っておけば良く，他の関数の内部実装は気にしなくて良い
+// 第一引数：読み込みの場合はデータの受取先，書き込みの場合はデータの送り元
+// 第二引数：読み書きするセクタ番号
+// 第三引数：読み込みなら0，書き込みなら1
+void read_write_disk(void *buf, unsigned sector, int is_write) {
+    if (sector >= blk_capacity / SECTOR_SIZE) {
+        printf("virtio: tried to read/write sector=%d, but capacity is %d\n",
+              sector, blk_capacity / SECTOR_SIZE);
+        return;
+    }
+
+    // virtio-blkの仕様に従って、リクエストを構築する
+    blk_req->sector = sector;
+    blk_req->type = is_write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    if (is_write)
+        memcpy(blk_req->data, buf, SECTOR_SIZE);
+
+    // virtqueueのディスクリプタを構築する (3つのディスクリプタを使う)
+    struct virtio_virtq *vq = blk_request_vq;
+    vq->descs[0].addr = blk_req_paddr;
+    vq->descs[0].len = sizeof(uint32_t) * 2 + sizeof(uint64_t);
+    vq->descs[0].flags = VIRTQ_DESC_F_NEXT;
+    vq->descs[0].next = 1;
+
+    vq->descs[1].addr = blk_req_paddr + offsetof(struct virtio_blk_req, data);
+    vq->descs[1].len = SECTOR_SIZE;
+    vq->descs[1].flags = VIRTQ_DESC_F_NEXT | (is_write ? 0 : VIRTQ_DESC_F_WRITE);
+    vq->descs[1].next = 2;
+
+    vq->descs[2].addr = blk_req_paddr + offsetof(struct virtio_blk_req, status);
+    vq->descs[2].len = sizeof(uint8_t);
+    vq->descs[2].flags = VIRTQ_DESC_F_WRITE;
+
+    // デバイスに新しいリクエストがあることを通知する
+    virtq_kick(vq, 0);
+
+    // デバイス側の処理が終わるまで待つ
+    while (virtq_is_busy(vq))
+        ;
+
+    // virtio-blk: 0でない値が返ってきたらエラー
+    if (blk_req->status != 0) {
+        printf("virtio: warn: failed to read/write sector=%d status=%d\n",
+               sector, blk_req->status);
+        return;
+    }
+
+    // 読み込み処理の場合は、バッファにデータをコピーする
+    if (!is_write)
+        memcpy(buf, blk_req->data, SECTOR_SIZE);
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
+    virtio_blk_init();
+
+    char buf[SECTOR_SIZE];
+    read_write_disk(buf, 0, false);
+    printf("first sector: %s\n", buf);
+
+    strcpy(buf, "hello from kernel!!!\n");
+    read_write_disk(buf, 0, true);
 
     idle_proc = create_process(NULL, 0);
     idle_proc->pid = 0; // idle
