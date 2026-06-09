@@ -86,6 +86,7 @@ struct process {
 #define PAGE_W    (1 << 2)   // 書き込み可能
 #define PAGE_X    (1 << 3)   // 実行可能
 #define PAGE_U    (1 << 4)   // ユーザーモードでアクセス可能
+#define SSTATUS_SUM  (1 << 18) // sstatus レジスタの SUM ビット．SUM ビットが立っていない場合，S-Mode プログラムは U-Mode のページにアクセスできない
 
 // ユーザランドのアプリケーションは，必ず0x01000000から展開するようにする
 #define USER_BASE 0x1000000
@@ -99,6 +100,8 @@ void yield(void);
 void virtio_blk_init(void);
 struct virtio_virtq *virtq_init(unsigned index);
 void virtq_kick(struct virtio_virtq *vq, int desc_index);
+void fs_init(void);
+void fs_flush(void);
 
 // 例外の識別子(例外ハンドラの実装で利用)
 #define SCAUSE_ECALL 8 // Environment call from U-mode
