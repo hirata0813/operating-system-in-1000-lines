@@ -203,6 +203,7 @@ void handle_syscall(struct trap_frame *f) {
         case SYS_EXIT:
             printf("process %d exited\n", current_proc->pid);
             current_proc->state = PROC_EXITED;
+            // TODO: ページテーブルの開放
             yield();
             PANIC("unreachable"); // exit したプロセスはここには来ない(はず)が，メモリ上には展開されたまま
         case SYS_GETCHAR:
@@ -254,16 +255,85 @@ void handle_syscall(struct trap_frame *f) {
 
 // n ページ分のメモリを動的に割り当て，その先頭アドレスを返す
 // この関数は，ページ単位でメモリを割り当てる．1ページは 4096 バイト
+
+// カーネルのグローバル変数
+struct free_page {
+    struct free_page *next;
+};
+
+// フリーリストの先頭を指すポインタ
+static struct free_page *free_list = NULL;
+// free_list の中身は，フリーリストの第1要素があるアドレスで，free_list自体のアドレスもグローバルに利用できるので，どこからでもフリーリストを利用できる
+// free_list 自体は，リストの1要素ではなくただのポインタ変数(間違えやすいので注意)
+// free_list -> next ( (*free_list).next の糖衣構文) は，第二要素のアドレス(つまり，第一要素が持つ next メンバ)を表す
+// つまり，free_list == NULL は，フリーリストが空であることを意味し，free_list -> next == NULL は，フリーリストに1つしか要素がないことを意味する
+
+void dump_free_list(void) {
+    printf("free_list dump:\n");
+    if (free_list == NULL) {
+        printf("  (empty)\n");
+        return;
+    }
+    struct free_page *cur = free_list;
+    int index = 0;
+    while (cur != NULL) {
+        printf("  [%d] addr: %x, next: %x\n",
+               index,
+               (uint32_t) cur,
+               (uint32_t) cur->next);
+        cur = cur->next;
+        index++;
+    }
+    printf("\n");
+}
+
+// n ページ連続確保（n=1 の単ページ確保を基本とする）
 paddr_t alloc_pages(uint32_t n) {
-    static paddr_t next_paddr = (paddr_t) __free_ram; // 次に割り当てられる空き領域の先頭アドレスを指す変数．関数呼び出し間で値が保持される
+    static paddr_t next_paddr = (paddr_t) __free_ram; // 未使用領域の先頭アドレスを指す変数．関数呼び出し間で値が保持される
+    // 単ページならフリーリストから取得を試みる
+    if (n == 1 && free_list != NULL) {
+        printf("Starting free list allocation:\n");
+        struct free_page *page = free_list; // フリーリストの先頭1要素をページとして割り当てる
+        free_list = free_list->next; // それまで第二要素だったものをフリーリストの先頭にする
+        memset((void *) page, 0, PAGE_SIZE);
+        printf("  > allocated page address: %x\n", (uint32_t) page);
+        printf("  > next_paddr: %x\n", next_paddr);
+        dump_free_list();
+        return (paddr_t) page;
+    }
+
+    // フリーリストにない場合はバンプアロケータで確保
+    printf("Starting n = %d bump allocation:\n", n);
+    printf("  > prev next_paddr: %x\n", next_paddr);
     paddr_t paddr = next_paddr;
     next_paddr += n * PAGE_SIZE;
-
     if (next_paddr > (paddr_t) __free_ram_end)
         PANIC("out of memory");
-
+    printf("  > next next_paddr: %x\n", next_paddr);
+    printf("\n");
     memset((void *) paddr, 0, n * PAGE_SIZE);
     return paddr;
+}
+
+// n ページ解放（ページの中身にポインタを書き込んでリストへ）
+void free_pages(paddr_t paddr, uint32_t n) {
+    // 1ページずつフリーリストに追加していく
+    printf("Starting n = %d freeing pages\n", n);
+    printf("\n");
+    for (uint32_t i = 0; i < n; i++) {
+        printf("  > freeing page address: %x, i = %d\n", paddr, i);
+        paddr_t p = paddr + i * PAGE_SIZE; // ページの先頭アドレスを計算
+        struct free_page *page = (struct free_page *) p; // ページの先頭アドレスを，free_page* 型として無理やり解釈
+                                                         // ここでキャストしているのは，そのようにすると，next メンバへのアクセスが可能になるから
+                                                         // 構造体ポインタ型は，構造体の実体そのものではないため，構造体が持つメンバへのアクセスはできないように思える
+                                                         // しかし，構造体ポインタ型にすることで，そのアドレスから始まる領域を「メモリレイアウトが構造体の実体通りになっていると解釈しろ」とできる
+                                                         // 構造体は，メンバの並び順に従い連続してデータが置かれたメモリ配置となっている
+                                                         // そのため，各メンバは，ベースアドレス+オフセットでアクセスできる
+                                                         // この下にある page->next も，ベースアドレス+オフセット(この場合，メンバがnextだけなのでベースアドレスそのもの)の位置には next メンバがあると解釈し，まるで構造体メンバにアクセスするかのように書ける
+        page->next = free_list; // page というアドレスから始まる4096バイトのページのうち，先頭4バイト(つまり，next メンバ領域)に free_list の値(つまり，それまでの先頭要素)を格納
+        free_list = page; // free_list の値を page に更新し，page をフリーリストの先頭にする．このようにすることで，page がフリーリストの先頭に割り込む形で登録される
+        dump_free_list();
+    }
 }
 
 void delay(void) {
@@ -682,19 +752,29 @@ void kernel_main(void) {
     virtio_blk_init();
     fs_init();
 
-    char buf[SECTOR_SIZE];
-    read_write_disk(buf, 0, false);
-    printf("first sector: %s\n", buf);
+    //char buf[SECTOR_SIZE];
+    //read_write_disk(buf, 0, false);
+    //printf("first sector: %s\n", buf);
 
-    strcpy(buf, "hello from kernel!!!\n");
-    read_write_disk(buf, 0, true);
+    //strcpy(buf, "hello from kernel!!!\n");
+    //read_write_disk(buf, 0, true);
 
-    idle_proc = create_process(NULL, 0);
-    idle_proc->pid = 0; // idle
-    current_proc = idle_proc;
+    printf("\n\n");
+    printf("==================\n");
+    printf("freeing pages test\n");
+    // ページ解放処理のテストコード
+    paddr_t paddr_test1 = alloc_pages(1);
+    paddr_t paddr_test2 = alloc_pages(1);
+    paddr_t paddr_test3 = alloc_pages(1);
+    free_pages(paddr_test2, 2);
+    paddr_test2 = alloc_pages(1);
 
-    create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
-    yield();
+    //idle_proc = create_process(NULL, 0);
+    //idle_proc->pid = 0; // idle
+    //current_proc = idle_proc;
+
+    // create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
+    // yield();
     PANIC("switched to idle process");
 }
 
