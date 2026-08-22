@@ -441,6 +441,7 @@ struct process *create_process(const void *image, size_t image_size) {
     *--sp = 0;                      // s0
     *--sp = (uint32_t) user_entry;  // ra
 
+    // プロセスに紐づく第1レベルページテーブルを確保．
     uint32_t *page_table = (uint32_t *) alloc_pages(1);
 
     // カーネルのページを各プロセスのページテーブルにもマッピングする
@@ -458,6 +459,7 @@ struct process *create_process(const void *image, size_t image_size) {
     // エントリ3: 仮想 0x1002000 → 物理 0x80267000
     // 先頭アドレスさえ対応付けておけば，あとは，CPU が順番に命令を拾って実行していってくれる
     for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+        printf("Creating process: mapping 0x%x data\n", (uint32_t) image + off);
         paddr_t page = alloc_pages(1);
 
         // コピーするデータがページサイズより小さい場合を考慮
@@ -467,11 +469,13 @@ struct process *create_process(const void *image, size_t image_size) {
 
         // 確保した物理ページに，実行イメージ(バイナリ)をコピー
         memcpy((void *) page, image + off, copy_size);
+        printf("  > copied %d bytes binary to physical page 0x%x\n", copy_size, (uint32_t) page);
 
         // ページテーブルに，仮想アドレスと物理アドレスの対応をマッピング
         // 物理アドレスは，上段で確保した物理ページのアドレス
         map_page(page_table, USER_BASE + off, page,
                  PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+        printf("  > mapped virtual 0x%x to physical 0x%x\n", USER_BASE + off, (uint32_t) page);
     }
     // 各フィールドを初期化
     proc->pid = i + 1;
@@ -752,29 +756,23 @@ void kernel_main(void) {
     virtio_blk_init();
     fs_init();
 
-    //char buf[SECTOR_SIZE];
-    //read_write_disk(buf, 0, false);
-    //printf("first sector: %s\n", buf);
+    // char buf[SECTOR_SIZE];
+    // read_write_disk(buf, 0, false);
+    // printf("first sector: %s\n", buf);
 
-    //strcpy(buf, "hello from kernel!!!\n");
-    //read_write_disk(buf, 0, true);
+    // strcpy(buf, "hello from kernel!!!\n");
+    // read_write_disk(buf, 0, true);
 
-    printf("\n\n");
-    printf("==================\n");
-    printf("freeing pages test\n");
-    // ページ解放処理のテストコード
-    paddr_t paddr_test1 = alloc_pages(1);
-    paddr_t paddr_test2 = alloc_pages(1);
-    paddr_t paddr_test3 = alloc_pages(1);
-    free_pages(paddr_test2, 2);
-    paddr_test2 = alloc_pages(1);
 
-    //idle_proc = create_process(NULL, 0);
-    //idle_proc->pid = 0; // idle
-    //current_proc = idle_proc;
+    idle_proc = create_process(NULL, 0);
+    idle_proc->pid = 0; // idle
+    current_proc = idle_proc;
 
-    // create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
-    // yield();
+    printf("======= kernel: starting first process =======\n");
+    printf("_binary_shell_bin_start = %x\n", (uint32_t) _binary_shell_bin_start);
+
+    create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
+    yield();
     PANIC("switched to idle process");
 }
 

@@ -102,8 +102,6 @@ struct virtio_virtq *virtq_init(unsigned index);
 void virtq_kick(struct virtio_virtq *vq, int desc_index);
 void fs_init(void);
 void fs_flush(void);
-void proc_a_entry(void);
-void proc_b_entry(void);
 
 // 例外の識別子(例外ハンドラの実装で利用)
 #define SCAUSE_ECALL 8 // Environment call from U-mode
