@@ -12,6 +12,9 @@ extern char _binary_shell_bin_start[], _binary_shell_bin_size[]; // shell.bin.o 
 struct process *current_proc; // 現在実行中のプロセス
 struct process *idle_proc;    // アイドルプロセス
 
+// ページテーブルの所有プロセスを管理する配列
+struct process *page_owners[TOTAL_PAGES];
+
 // disk[]: ディスクイメージをそのまま展開するための変数
 // files[]: disk[] の中身を構造化して区切った配列
 struct file files[FILES_MAX];
@@ -292,25 +295,25 @@ paddr_t alloc_pages(uint32_t n) {
     static paddr_t next_paddr = (paddr_t) __free_ram; // 未使用領域の先頭アドレスを指す変数．関数呼び出し間で値が保持される
     // 単ページならフリーリストから取得を試みる
     if (n == 1 && free_list != NULL) {
-        printf("Starting free list allocation:\n");
+        //printf("Starting free list allocation:\n");
         struct free_page *page = free_list; // フリーリストの先頭1要素をページとして割り当てる
         free_list = free_list->next; // それまで第二要素だったものをフリーリストの先頭にする
         memset((void *) page, 0, PAGE_SIZE);
-        printf("  > allocated page address: %x\n", (uint32_t) page);
-        printf("  > next_paddr: %x\n", next_paddr);
-        dump_free_list();
+        //printf("  > allocated page address: %x\n", (uint32_t) page);
+        //printf("  > next_paddr: %x\n", next_paddr);
+        //dump_free_list();
         return (paddr_t) page;
     }
 
     // フリーリストにない場合はバンプアロケータで確保
-    printf("Starting n = %d bump allocation:\n", n);
-    printf("  > prev next_paddr: %x\n", next_paddr);
+    // printf("Starting n = %d bump allocation:\n", n);
+    // printf("  > prev next_paddr: %x\n", next_paddr);
     paddr_t paddr = next_paddr;
     next_paddr += n * PAGE_SIZE;
     if (next_paddr > (paddr_t) __free_ram_end)
         PANIC("out of memory");
-    printf("  > next next_paddr: %x\n", next_paddr);
-    printf("\n");
+    // printf("  > next next_paddr: %x\n", next_paddr);
+    // printf("\n");
     memset((void *) paddr, 0, n * PAGE_SIZE);
     return paddr;
 }
@@ -318,10 +321,10 @@ paddr_t alloc_pages(uint32_t n) {
 // n ページ解放（ページの中身にポインタを書き込んでリストへ）
 void free_pages(paddr_t paddr, uint32_t n) {
     // 1ページずつフリーリストに追加していく
-    printf("Starting n = %d freeing pages\n", n);
-    printf("\n");
+    // printf("Starting n = %d freeing pages\n", n);
+    // printf("\n");
     for (uint32_t i = 0; i < n; i++) {
-        printf("  > freeing page address: %x, i = %d\n", paddr, i);
+        // printf("  > freeing page address: %x, i = %d\n", paddr, i);
         paddr_t p = paddr + i * PAGE_SIZE; // ページの先頭アドレスを計算
         struct free_page *page = (struct free_page *) p; // ページの先頭アドレスを，free_page* 型として無理やり解釈
                                                          // ここでキャストしているのは，そのようにすると，next メンバへのアクセスが可能になるから
@@ -459,7 +462,7 @@ struct process *create_process(const void *image, size_t image_size) {
     // エントリ3: 仮想 0x1002000 → 物理 0x80267000
     // 先頭アドレスさえ対応付けておけば，あとは，CPU が順番に命令を拾って実行していってくれる
     for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
-        printf("Creating process: mapping 0x%x data\n", (uint32_t) image + off);
+        // printf("Creating process: mapping 0x%x data\n", (uint32_t) image + off);
         paddr_t page = alloc_pages(1);
 
         // コピーするデータがページサイズより小さい場合を考慮
@@ -469,13 +472,13 @@ struct process *create_process(const void *image, size_t image_size) {
 
         // 確保した物理ページに，実行イメージ(バイナリ)をコピー
         memcpy((void *) page, image + off, copy_size);
-        printf("  > copied %d bytes binary to physical page 0x%x\n", copy_size, (uint32_t) page);
+        // printf("  > copied %d bytes binary to physical page 0x%x\n", copy_size, (uint32_t) page);
 
         // ページテーブルに，仮想アドレスと物理アドレスの対応をマッピング
         // 物理アドレスは，上段で確保した物理ページのアドレス
         map_page(page_table, USER_BASE + off, page,
                  PAGE_U | PAGE_R | PAGE_W | PAGE_X);
-        printf("  > mapped virtual 0x%x to physical 0x%x\n", USER_BASE + off, (uint32_t) page);
+        // printf("  > mapped virtual 0x%x to physical 0x%x\n", USER_BASE + off, (uint32_t) page);
     }
     // 各フィールドを初期化
     proc->pid = i + 1;
@@ -749,9 +752,33 @@ void fs_flush(void) {
     printf("wrote %d bytes to disk\n", sizeof(disk));
 }
 
+void page_owners_init(void) {
+    for (int i = 0; i < TOTAL_PAGES; i++)
+        page_owners[i] = PAGE_UNALLOCATED;
+}
+
+void print_page_owner(int page_index) {
+    if (page_index < 0 || page_index >= TOTAL_PAGES) {
+        printf("Invalid page index: %d\n", page_index);
+        return;
+    }
+
+    paddr_t page_addr = page_index * PAGE_SIZE;
+    struct process* owner = page_owners[page_index];
+
+    if (owner == PAGE_UNALLOCATED) {
+        printf("Page %d (address 0x%x) is unallocated.\n", page_index, page_addr);
+    } else {
+        printf("Page %d (address 0x%x) is owned by process with PID %d.\n", page_index, page_addr, owner->pid);
+    }
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
+
+    // page_owners を初期化(全ページ未割り当てという状態を作る)
+    page_owners_init();
 
     virtio_blk_init();
     fs_init();
@@ -767,9 +794,6 @@ void kernel_main(void) {
     idle_proc = create_process(NULL, 0);
     idle_proc->pid = 0; // idle
     current_proc = idle_proc;
-
-    printf("======= kernel: starting first process =======\n");
-    printf("_binary_shell_bin_start = %x\n", (uint32_t) _binary_shell_bin_start);
 
     create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
     yield();

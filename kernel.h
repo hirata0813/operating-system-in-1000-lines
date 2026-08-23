@@ -102,6 +102,14 @@ struct virtio_virtq *virtq_init(unsigned index);
 void virtq_kick(struct virtio_virtq *vq, int desc_index);
 void fs_init(void);
 void fs_flush(void);
+void page_owners_init(void);
+void print_page_owner(int page_index);
+
+// ページテーブルの個数(本来は，リンカスクリプト内のシンボル __free_ram，__free_ram_end から計算すべきだが，これらはコンパイル時には値が決まらないため，あえて固定値で計算
+#define TOTAL_PAGES  (64 * 1024 * 1024) / PAGE_SIZE
+
+// ページが未割り当てであることを示す値
+#define PAGE_UNALLOCATED ((struct process *) -1)
 
 // 例外の識別子(例外ハンドラの実装で利用)
 #define SCAUSE_ECALL 8 // Environment call from U-mode
