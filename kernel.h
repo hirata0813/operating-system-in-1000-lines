@@ -94,7 +94,9 @@ struct process {
 #define SSTATUS_SPIE (1 << 5)
 
 // プロトタイプ宣言
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
+void map_page(struct process* proc, uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
+paddr_t alloc_pages(struct process* proc, uint32_t n);
+void free_pages(paddr_t paddr, uint32_t n);
 void handle_syscall(struct trap_frame *f);
 void yield(void);
 void virtio_blk_init(void);
@@ -104,6 +106,9 @@ void fs_init(void);
 void fs_flush(void);
 void page_owners_init(void);
 void print_page_owner(int page_index);
+void free_proc_pages(struct process *proc);
+int num_page(struct process *proc);
+uint32_t paddr_to_index(paddr_t paddr);
 
 // ページテーブルの個数(本来は，リンカスクリプト内のシンボル __free_ram，__free_ram_end から計算すべきだが，これらはコンパイル時には値が決まらないため，あえて固定値で計算
 #define TOTAL_PAGES  (64 * 1024 * 1024) / PAGE_SIZE

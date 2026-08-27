@@ -206,7 +206,7 @@ void handle_syscall(struct trap_frame *f) {
         case SYS_EXIT:
             printf("process %d exited\n", current_proc->pid);
             current_proc->state = PROC_EXITED;
-            // TODO: ページテーブルの開放
+            free_proc_pages(current_proc);
             yield();
             PANIC("unreachable"); // exit したプロセスはここには来ない(はず)が，メモリ上には展開されたまま
         case SYS_GETCHAR:
@@ -290,18 +290,37 @@ void dump_free_list(void) {
     printf("\n");
 }
 
+// 動的割当用ページ(__free_ram 〜 __free_ram_end 内のページ)について，そのページのインデックスを返す
+// 主に，alloc_pages 内で，動的に割り当てたページのインデックスを計算し，page_owners[] に所有者情報を登録するために使う
+// PPN とは異なる．PPN は，アドレス空間全体をページ単位で分割したときの番号だが，この関数で返すのは，__free_ram 〜 __free_ram_end の範囲内でのページ番号
+uint32_t paddr_to_index(paddr_t paddr) {
+    if (paddr < (paddr_t)__free_ram || paddr >= (paddr_t)__free_ram_end){ // 無効な物理アドレスの場合
+        return -1;
+    }
+    printf("paddr_to_index: paddr %x, index %d\n", paddr, (paddr - (paddr_t)__free_ram) / PAGE_SIZE);
+    
+    return (paddr - (paddr_t)__free_ram) / PAGE_SIZE;
+}
+
 // n ページ連続確保（n=1 の単ページ確保を基本とする）
-paddr_t alloc_pages(uint32_t n) {
+paddr_t alloc_pages(struct process* proc, uint32_t n) {
     static paddr_t next_paddr = (paddr_t) __free_ram; // 未使用領域の先頭アドレスを指す変数．関数呼び出し間で値が保持される
     // 単ページならフリーリストから取得を試みる
     if (n == 1 && free_list != NULL) {
         //printf("Starting free list allocation:\n");
         struct free_page *page = free_list; // フリーリストの先頭1要素をページとして割り当てる
         free_list = free_list->next; // それまで第二要素だったものをフリーリストの先頭にする
+
+        uint32_t page_index = paddr_to_index((paddr_t) page);
+        if (page_index == (uint32_t)-1) {
+            PANIC("alloc_pages: invalid page address %x\n", (paddr_t) page);
+        }
+        page_owners[page_index] = proc; // ページの所有者を登録
         memset((void *) page, 0, PAGE_SIZE);
         //printf("  > allocated page address: %x\n", (uint32_t) page);
         //printf("  > next_paddr: %x\n", next_paddr);
         //dump_free_list();
+        printf("alloc_pages: paddr %x allocated\n", (paddr_t) page);
         return (paddr_t) page;
     }
 
@@ -314,7 +333,18 @@ paddr_t alloc_pages(uint32_t n) {
         PANIC("out of memory");
     // printf("  > next next_paddr: %x\n", next_paddr);
     // printf("\n");
+
+    // n ページ分すべてに所有者情報を登録
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t page_index = paddr_to_index(paddr + i * PAGE_SIZE);
+        if (page_index == (uint32_t)-1)
+            PANIC("alloc_pages: invalid page address %x\n", paddr + i * PAGE_SIZE);
+        page_owners[page_index] = proc;
+    }
+
     memset((void *) paddr, 0, n * PAGE_SIZE);
+
+    printf("alloc_pages: paddr %x allocated\n", paddr);
     return paddr;
 }
 
@@ -335,7 +365,7 @@ void free_pages(paddr_t paddr, uint32_t n) {
                                                          // この下にある page->next も，ベースアドレス+オフセット(この場合，メンバがnextだけなのでベースアドレスそのもの)の位置には next メンバがあると解釈し，まるで構造体メンバにアクセスするかのように書ける
         page->next = free_list; // page というアドレスから始まる4096バイトのページのうち，先頭4バイト(つまり，next メンバ領域)に free_list の値(つまり，それまでの先頭要素)を格納
         free_list = page; // free_list の値を page に更新し，page をフリーリストの先頭にする．このようにすることで，page がフリーリストの先頭に割り込む形で登録される
-        dump_free_list();
+        // dump_free_list();
     }
 }
 
@@ -445,15 +475,15 @@ struct process *create_process(const void *image, size_t image_size) {
     *--sp = (uint32_t) user_entry;  // ra
 
     // プロセスに紐づく第1レベルページテーブルを確保．
-    uint32_t *page_table = (uint32_t *) alloc_pages(1);
+    uint32_t *page_table = (uint32_t *) alloc_pages(proc, 1);
 
     // カーネルのページを各プロセスのページテーブルにもマッピングする
     // この理由は，例外発生時などには，ユーザモードプロセスのページテーブルを用いてカーネルのコードにアクセスする必要があるから
     for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
-        map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+        map_page(proc, page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
 
     // virtio ブロックデバイスの MMIO 領域をマッピング
-    map_page(page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W);
+    map_page(proc, page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W);
 
     // ページテーブルに，アプリの実行バイナリの仮想->物理の対応を登録する
     // image_size が3ページ分であれば，以下のようになる
@@ -463,7 +493,7 @@ struct process *create_process(const void *image, size_t image_size) {
     // 先頭アドレスさえ対応付けておけば，あとは，CPU が順番に命令を拾って実行していってくれる
     for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
         // printf("Creating process: mapping 0x%x data\n", (uint32_t) image + off);
-        paddr_t page = alloc_pages(1);
+        paddr_t page = alloc_pages(proc, 1);
 
         // コピーするデータがページサイズより小さい場合を考慮
         // https://github.com/nuta/operating-system-in-1000-lines/pull/27
@@ -476,7 +506,7 @@ struct process *create_process(const void *image, size_t image_size) {
 
         // ページテーブルに，仮想アドレスと物理アドレスの対応をマッピング
         // 物理アドレスは，上段で確保した物理ページのアドレス
-        map_page(page_table, USER_BASE + off, page,
+        map_page(proc, page_table, USER_BASE + off, page,
                  PAGE_U | PAGE_R | PAGE_W | PAGE_X);
         // printf("  > mapped virtual 0x%x to physical 0x%x\n", USER_BASE + off, (uint32_t) page);
     }
@@ -503,6 +533,7 @@ void yield(void) {
     // 現在実行中のプロセス以外に、実行可能なプロセスがない。戻って処理を続行する
     if (next == current_proc)
         return;
+    printf("num_page(next. PID:%d) = %d\n",next->pid, num_page(next));
 
     // 次に動かすプロセスのカーネルスタックの初期値を，sscratch レジスタに設定
     // satp レジスタは，「どのページテーブルを使うか」を CPU に伝えるレジスタ
@@ -528,7 +559,7 @@ void yield(void) {
 // 1段目のページテーブル(table1)，マップしたい仮想アドレス(vaddr)，マップ先の物理アドレス(paddr)，ページテーブルエントリに設定するフラグ(flags)を受け取り，ページテーブルを構築する
 // vaddr と paddr の対応を1エントリ登録する
 // table1[vpn1] は，第2レベルテーブルのPPN(物理メモリ全体を4KBで区切ったときに，何番目のページになるか)と，第2レベルテーブルが作成されているかどうかを表すビット(0bit目)が入っている．
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+void map_page(struct process* proc, uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
     // ページサイズが 4KB なので，vaddr，paddr ともに 4KB 単位である必要がある
     if (!is_aligned(vaddr, PAGE_SIZE))
         PANIC("unaligned vaddr %x", vaddr);
@@ -539,7 +570,7 @@ void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
     // まず，第2レベルテーブルという空の入れ物を用意して，table1[vpn1] からそこへの道案内を登録
     uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
     if ((table1[vpn1] & PAGE_V) == 0) { // table1[vpn1]の0bit目を見て，第2レベルテーブルが存在するか確認
-        uint32_t pt_paddr = alloc_pages(1);
+        uint32_t pt_paddr = alloc_pages(proc, 1);
         table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V; // 10bit 目以降に PPN をセットして，フラグを立てる
     }
 
@@ -582,12 +613,12 @@ void virtio_blk_init(void) {
     printf("virtio-blk: capacity is %d bytes\n", (int)blk_capacity);
 
     // デバイスへの処理要求を格納する領域を確保
-    blk_req_paddr = alloc_pages(align_up(sizeof(*blk_req), PAGE_SIZE) / PAGE_SIZE);
+    blk_req_paddr = alloc_pages(NULL, align_up(sizeof(*blk_req), PAGE_SIZE) / PAGE_SIZE);
     blk_req = (struct virtio_blk_req *) blk_req_paddr;
 }
 
 struct virtio_virtq *virtq_init(unsigned index) {
-    paddr_t virtq_paddr = alloc_pages(align_up(sizeof(struct virtio_virtq), PAGE_SIZE) / PAGE_SIZE);
+    paddr_t virtq_paddr = alloc_pages(NULL, align_up(sizeof(struct virtio_virtq), PAGE_SIZE) / PAGE_SIZE);
     struct virtio_virtq *vq = (struct virtio_virtq *) virtq_paddr;
     vq->queue_index = index;
     vq->used_index = (volatile uint16_t *) &vq->used.index;
@@ -773,9 +804,44 @@ void print_page_owner(int page_index) {
     }
 }
 
+void print_page_owner_by_proc(struct process *proc) {
+    for (int i = 0; i < TOTAL_PAGES; i++) {
+        if (page_owners[i] == proc) {
+            paddr_t page_addr = (paddr_t)__free_ram + i * PAGE_SIZE; // 該当ページのエントリを計算
+            if (page_owners[i] == PAGE_UNALLOCATED) {
+                printf("Page %d (address 0x%x) is unallocated.\n", i + 1, page_addr);
+            } else {
+                printf("Page %d (address 0x%x) is owned.\n", i + 1, page_addr);
+            }
+        }
+    }
+}
+
+int num_page(struct process *proc) {
+    int num = 0;
+    for (int i = 0; i < TOTAL_PAGES; i++) {
+        if (page_owners[i] == proc)
+            num++;
+    }
+    return num;
+}
+
+void free_proc_pages(struct process *proc){
+    // page_owners 配列を走査し、指定されたプロセスが所有するページを解放
+    for (int i = 0; i < TOTAL_PAGES; i++) {
+        if (page_owners[i] == proc) {
+            paddr_t page_addr = (paddr_t)__free_ram + i * PAGE_SIZE; // 該当ページのエントリを計算
+            free_pages(page_addr, 1); // ページを解放
+            page_owners[i] = PAGE_UNALLOCATED;
+        }
+    }
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
+    printf("===== Kernel Start =====\n");
+    printf("__free_ram: %x, __free_ram_end: %x\n", (paddr_t) __free_ram, (paddr_t) __free_ram_end);
 
     // page_owners を初期化(全ページ未割り当てという状態を作る)
     page_owners_init();
