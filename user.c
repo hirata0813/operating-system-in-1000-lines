@@ -3,6 +3,10 @@
 extern char __stack_top[];
 
 // システムコールラッパ
+void time() {
+    syscall(SYS_TIME, 0, 0, 0);
+}
+
 void putchar(char ch) {
     syscall(SYS_PUTCHAR, ch, 0, 0);
 }

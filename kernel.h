@@ -98,6 +98,7 @@ void map_page(struct process* proc, uint32_t *table1, uint32_t vaddr, paddr_t pa
 paddr_t alloc_pages(struct process* proc, uint32_t n);
 void free_pages(paddr_t paddr, uint32_t n);
 void handle_syscall(struct trap_frame *f);
+void handle_sti();
 void yield(void);
 void virtio_blk_init(void);
 struct virtio_virtq *virtq_init(unsigned index);
@@ -118,6 +119,10 @@ uint32_t paddr_to_index(paddr_t paddr);
 
 // 例外の識別子(例外ハンドラの実装で利用)
 #define SCAUSE_ECALL 8 // Environment call from U-mode
+#define SCAUSE_STI 0x80000005 // Supervisor Timer Interrupt. 識別子の値は，マニュアルの Table4.2 を参照し決定
+
+// CPU 周波数
+#define CPU_FREQ 10000000
 
 // virtio 用の雑多な定義
 #define SECTOR_SIZE       512

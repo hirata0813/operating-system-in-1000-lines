@@ -194,11 +194,21 @@ void handle_trap(struct trap_frame *f) {
     if (scause == SCAUSE_ECALL) {
         handle_syscall(f);
         user_pc += 4;
+    } else if (scause == SCAUSE_STI) {
+        // handlw_sti();
+        yield();
+
     } else {
         PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
     }
 
     WRITE_CSR(sepc, user_pc);
+}
+
+void handle_sti() {
+    // タイマ割込みが発生した場合，処理をして，mtimecmp レジスタを更新
+    //uint32_t mtimecmp = READ_CSR(mtimecmp);
+    //printf("handle_sti processing.\n");
 }
 
 void handle_syscall(struct trap_frame *f) {
@@ -251,6 +261,15 @@ void handle_syscall(struct trap_frame *f) {
             f->a0 = len;
             break;
         }
+        case SYS_TIME:
+            // time レジスタと timeh レジスタを読み，現在のハードウェアタイマを確認
+            uint32_t timeh = READ_CSR(timeh);
+            uint32_t time = READ_CSR(time);
+            printf("timeh: %x, time: %x\n", timeh, time);
+            printf("Total Cycle: %x%x\n", timeh, time);          // 64bit値を16進16桁で表示
+            uint32_t seconds = (uint32_t)(time / CPU_FREQ);  // RV32 で64bit演算しようとすると，error: undefined symbol: __udivdi3 が発生する．timeh は，システム起動後429sまでは0なので，一旦 timeh は0として扱う
+            printf("Total Time (sec): %d\n", seconds);
+            break;
         default:
             PANIC("unexpected syscall a3=%x\n", f->a3);
     }
@@ -297,7 +316,7 @@ uint32_t paddr_to_index(paddr_t paddr) {
     if (paddr < (paddr_t)__free_ram || paddr >= (paddr_t)__free_ram_end){ // 無効な物理アドレスの場合
         return -1;
     }
-    printf("paddr_to_index: paddr %x, index %d\n", paddr, (paddr - (paddr_t)__free_ram) / PAGE_SIZE);
+    //printf("paddr_to_index: paddr %x, index %d\n", paddr, (paddr - (paddr_t)__free_ram) / PAGE_SIZE);
     
     return (paddr - (paddr_t)__free_ram) / PAGE_SIZE;
 }
@@ -320,7 +339,7 @@ paddr_t alloc_pages(struct process* proc, uint32_t n) {
         //printf("  > allocated page address: %x\n", (uint32_t) page);
         //printf("  > next_paddr: %x\n", next_paddr);
         //dump_free_list();
-        printf("alloc_pages: paddr %x allocated\n", (paddr_t) page);
+        //printf("alloc_pages: paddr %x allocated\n", (paddr_t) page);
         return (paddr_t) page;
     }
 
@@ -344,7 +363,7 @@ paddr_t alloc_pages(struct process* proc, uint32_t n) {
 
     memset((void *) paddr, 0, n * PAGE_SIZE);
 
-    printf("alloc_pages: paddr %x allocated\n", paddr);
+    //printf("alloc_pages: paddr %x allocated\n", paddr);
     return paddr;
 }
 
