@@ -856,6 +856,27 @@ void free_proc_pages(struct process *proc){
     }
 }
 
+#define SIE_STIE   (1 << 5)  // sie レジスタの Supervisor Timer Interrupt Enable ビット
+#define SSTATUS_SIE (1 << 1) // sstatus レジスタの Supervisor Interrupt Enable ビット
+
+void enable_timer_interrupt(void) {
+
+    // 割り込みを有効化するための設定
+    // 1. sstatus レジスタの SIE ビットをセットして，S-Mode での割り込みを有効化
+    uint32_t sstatus = READ_CSR(sstatus);
+    WRITE_CSR(sstatus, sstatus | SSTATUS_SIE);
+
+    // 2. sie レジスタの STIE ビットをセットして，S-Mode で割り込みを処理するようにする
+    uint32_t sie = READ_CSR(sie);
+    WRITE_CSR(sie, sie | SIE_STIE);
+}
+
+void set_next_timer_interrupt() {
+    // time レジスタの値を取得
+
+    // mtimecmp レジスタの値を time レジスタの値 + STI_INTERVAL に設定
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
@@ -867,6 +888,11 @@ void kernel_main(void) {
 
     virtio_blk_init();
     fs_init();
+
+    // タイマ割り込みを有効化
+    enable_timer_interrupt();
+
+    // mtimecmp レジスタの値を初期化
 
     // char buf[SECTOR_SIZE];
     // read_write_disk(buf, 0, false);

@@ -124,6 +124,9 @@ uint32_t paddr_to_index(paddr_t paddr);
 // CPU 周波数
 #define CPU_FREQ 10000000
 
+// タイマ割り込みの発生頻度
+#define STI_INTERVAL 50000000 // 5s
+
 // virtio 用の雑多な定義
 #define SECTOR_SIZE       512
 #define VIRTQ_ENTRY_NUM   16
