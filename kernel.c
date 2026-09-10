@@ -573,12 +573,24 @@ struct process *create_idle_process(void) {
     *--sp = 0;                      // s1
     *--sp = 0;                      // s0
     *--sp = (uint32_t) idle_main;  // ra
+    printf("idle_main addr: %x\n",idle_main);
+
+    // プロセスに紐づく第1レベルページテーブルを確保．
+    uint32_t *page_table = (uint32_t *) alloc_pages(proc, 1);
+
+    // カーネルのページを各プロセスのページテーブルにもマッピングする
+    // この理由は，例外発生時などには，ユーザモードプロセスのページテーブルを用いてカーネルのコードにアクセスする必要があるから
+    for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE)
+        map_page(proc, page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+
+    // virtio ブロックデバイスの MMIO 領域をマッピング
+    map_page(proc, page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W);
 
     // 各フィールドを初期化
     proc->pid = i + 1;
     proc->state = PROC_RUNNABLE;
     proc->sp = (uint32_t) sp;
-    proc->page_table = NULL; // アイドルプロセスは S-Mode 専用のプロセスなので不要
+    proc->page_table = page_table; // アイドルプロセスは S-Mode 専用のプロセスなので不要
     return proc;
 }
 
