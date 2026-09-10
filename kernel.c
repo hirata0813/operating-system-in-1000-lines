@@ -184,7 +184,6 @@ struct file *fs_lookup(const char *filename) {
 }
 
 void handle_trap(struct trap_frame *f) {
-
     // READ_CSR()マクロに引数を渡す時，引数は文字列として展開される．例えば，READ_CSR(scause) と書くと，マクロの中で #reg として "scause" という文字列が展開される
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
@@ -195,9 +194,8 @@ void handle_trap(struct trap_frame *f) {
         handle_syscall(f);
         user_pc += 4;
     } else if (scause == SCAUSE_STI) {
-        // handlw_sti();
-        yield();
-
+        handle_sti();
+        user_pc += 4;
     } else {
         PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
     }
@@ -208,7 +206,8 @@ void handle_trap(struct trap_frame *f) {
 void handle_sti() {
     // タイマ割込みが発生した場合，処理をして，mtimecmp レジスタを更新
     //uint32_t mtimecmp = READ_CSR(mtimecmp);
-    //printf("handle_sti processing.\n");
+    printf("handle_sti processing.\n");
+    set_next_timer_interrupt();
 }
 
 void handle_syscall(struct trap_frame *f) {
@@ -262,13 +261,7 @@ void handle_syscall(struct trap_frame *f) {
             break;
         }
         case SYS_TIME:
-            // time レジスタと timeh レジスタを読み，現在のハードウェアタイマを確認
-            uint32_t timeh = READ_CSR(timeh);
-            uint32_t time = READ_CSR(time);
-            printf("timeh: %x, time: %x\n", timeh, time);
-            printf("Total Cycle: %x%x\n", timeh, time);          // 64bit値を16進16桁で表示
-            uint32_t seconds = (uint32_t)(time / CPU_FREQ);  // RV32 で64bit演算しようとすると，error: undefined symbol: __udivdi3 が発生する．timeh は，システム起動後429sまでは0なので，一旦 timeh は0として扱う
-            printf("Total Time (sec): %d\n", seconds);
+            print_current_time();
             break;
         default:
             PANIC("unexpected syscall a3=%x\n", f->a3);
@@ -537,21 +530,74 @@ struct process *create_process(const void *image, size_t image_size) {
     return proc;
 }
 
+// アイドルプロセス(S-Mode 専用)
+// 内部で，タイマ割り込み周りの CSR を再設定して，wfi を呼び出す
+// トラップハンドラ内で wfi を呼び出しても，トラップハンドラ内でのさらなる割り込み発生は無効化されるため，ハンドラ外で wfi を呼び出す必要がある
+void idle_main(void) {
+    printf("idle process started.\n");
+    while (1) {
+        __asm__ __volatile__("wfi");  // ここでCPUを休ませる
+    }
+}
+
+// アイドルプロセスの初期化処理を行う．
+// 通常の create_process() との違いは，ページテーブルを用意しないことと，ra レジスタに idle_main() を設定すること
+struct process *create_idle_process(void) {
+    // 空いているプロセス管理構造体を探す
+    struct process *proc = NULL;
+    int i;
+    for (i = 0; i < PROCS_MAX; i++) {
+        if (procs[i].state == PROC_UNUSED) {
+            proc = &procs[i];
+            break;
+        }
+    }
+
+    if (!proc)
+        PANIC("no free process slots");
+
+    // switch_context() で復帰できるように、スタックに呼び出し先保存レジスタを積む
+    // プロセス管理構造体の stack には，レジスタの途中状態やプロセス内で利用するローカル変数，関数呼び出し時の引数の情報など格納
+    // 各プロセスが持つ sp の初期値は，stack の先頭からではなく，stack の最後からになる．なぜなら，スタックは，低アドレスに向かって伸びていくから
+    uint32_t *sp = (uint32_t *) &proc->stack[sizeof(proc->stack)];
+    *--sp = 0;                      // s11
+    *--sp = 0;                      // s10
+    *--sp = 0;                      // s9
+    *--sp = 0;                      // s8
+    *--sp = 0;                      // s7
+    *--sp = 0;                      // s6
+    *--sp = 0;                      // s5
+    *--sp = 0;                      // s4
+    *--sp = 0;                      // s3
+    *--sp = 0;                      // s2
+    *--sp = 0;                      // s1
+    *--sp = 0;                      // s0
+    *--sp = (uint32_t) idle_main;  // ra
+
+    // 各フィールドを初期化
+    proc->pid = i + 1;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t) sp;
+    proc->page_table = NULL; // アイドルプロセスは S-Mode 専用のプロセスなので不要
+    return proc;
+}
+
 void yield(void) {
     // 実行可能なプロセスを探す
     struct process *next = idle_proc;
     for (int i = 0; i < PROCS_MAX; i++) {
         // 現在実行中のプロセスの次のプロセスから順番に、実行可能なプロセスを探す。見つかったら、そのプロセスを次の実行プロセスとして選ぶ
         struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
-        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0 && proc != current_proc) {
             next = proc;
             break;
         }
     }
 
-    // 現在実行中のプロセス以外に、実行可能なプロセスがない。戻って処理を続行する
-    if (next == current_proc)
+    // 現在実行中のプロセス以外に実行可能なプロセスがない場合，アイドルプロセスに切り替える
+    if (next == current_proc){
         return;
+    }
     printf("num_page(next. PID:%d) = %d\n",next->pid, num_page(next));
 
     // 次に動かすプロセスのカーネルスタックの初期値を，sscratch レジスタに設定
@@ -859,22 +905,48 @@ void free_proc_pages(struct process *proc){
 #define SIE_STIE   (1 << 5)  // sie レジスタの Supervisor Timer Interrupt Enable ビット
 #define SSTATUS_SIE (1 << 1) // sstatus レジスタの Supervisor Interrupt Enable ビット
 
-void enable_timer_interrupt(void) {
-
+void enable_timer_interrupt() {
     // 割り込みを有効化するための設定
     // 1. sstatus レジスタの SIE ビットをセットして，S-Mode での割り込みを有効化
     uint32_t sstatus = READ_CSR(sstatus);
     WRITE_CSR(sstatus, sstatus | SSTATUS_SIE);
 
-    // 2. sie レジスタの STIE ビットをセットして，S-Mode で割り込みを処理するようにする
+    // 2. sie レジスタの STIE ビットをセットして，S-Mode でタイマ割り込みを処理するようにする
     uint32_t sie = READ_CSR(sie);
     WRITE_CSR(sie, sie | SIE_STIE);
 }
 
+void print_sstatus_reg() {
+    uint32_t sstatus = READ_CSR(sstatus);
+    printf("sstatus reg: %x\n", sstatus);
+}
+
 void set_next_timer_interrupt() {
     // time レジスタの値を取得
+    uint32_t timeh = READ_CSR(timeh);
+    uint32_t time  = READ_CSR(time);
+    uint64_t now = ((uint64_t)timeh << 32) | time;
+
+    // 64bitのまま加算(オーバーフローしてもtimeh側へ正しく繰り上がる)
+    uint64_t next = now + STI_INTERVAL;
 
     // mtimecmp レジスタの値を time レジスタの値 + STI_INTERVAL に設定
+    // 64bit値を下位/上位に分けてSBIへ渡す
+    sbi_call((long)(next & 0xffffffff),   // a0: 下位32bit
+             (long)(next >> 32),          // a1: 上位32bit
+             0, 0, 0, 0,
+             0,           // fid = 0
+             0x54494d45);               // eid = 0x54494d45
+}
+
+void print_current_time(){
+    // time レジスタと timeh レジスタを読み，現在のハードウェアタイマを確認
+    uint32_t timeh = READ_CSR(timeh);
+    uint32_t time = READ_CSR(time);
+    printf("timeh: %x, time: %x\n", timeh, time);
+    printf("Total Cycle: %x%x\n", timeh, time);          // 64bit値を16進16桁で表示
+    uint32_t seconds = (uint32_t)(time / CPU_FREQ);  // RV32 で64bit演算しようとすると，error: undefined symbol: __udivdi3 が発生する．timeh は，システム起動後429sまでは0なので，一旦 timeh は0として扱う
+    printf("Total Time (sec): %d\n", seconds);
 }
 
 void kernel_main(void) {
@@ -889,21 +961,22 @@ void kernel_main(void) {
     virtio_blk_init();
     fs_init();
 
+    print_sstatus_reg();
+
     // タイマ割り込みを有効化
     enable_timer_interrupt();
 
+    print_sstatus_reg();
+
     // mtimecmp レジスタの値を初期化
+    set_next_timer_interrupt();
 
-    // char buf[SECTOR_SIZE];
-    // read_write_disk(buf, 0, false);
-    // printf("first sector: %s\n", buf);
+    //idle_proc = create_process(NULL, 0);
+    //idle_proc->pid = 0; // idle
+    //current_proc = idle_proc;
 
-    // strcpy(buf, "hello from kernel!!!\n");
-    // read_write_disk(buf, 0, true);
-
-
-    idle_proc = create_process(NULL, 0);
-    idle_proc->pid = 0; // idle
+    idle_proc = create_idle_process();
+    idle_proc->pid = 0;
     current_proc = idle_proc;
 
     create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);

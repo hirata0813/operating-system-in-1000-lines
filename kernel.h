@@ -110,6 +110,12 @@ void print_page_owner(int page_index);
 void free_proc_pages(struct process *proc);
 int num_page(struct process *proc);
 uint32_t paddr_to_index(paddr_t paddr);
+void enable_timer_interrupt();
+void set_next_timer_interrupt();
+void print_current_time();
+void print_sstatus_reg();
+void idle_main(void);
+struct process *create_idle_process(void);
 
 // ページテーブルの個数(本来は，リンカスクリプト内のシンボル __free_ram，__free_ram_end から計算すべきだが，これらはコンパイル時には値が決まらないため，あえて固定値で計算
 #define TOTAL_PAGES  (64 * 1024 * 1024) / PAGE_SIZE
