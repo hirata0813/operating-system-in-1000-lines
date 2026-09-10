@@ -600,7 +600,7 @@ void yield(void) {
     for (int i = 0; i < PROCS_MAX; i++) {
         // 現在実行中のプロセスの次のプロセスから順番に、実行可能なプロセスを探す。見つかったら、そのプロセスを次の実行プロセスとして選ぶ
         struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
-        if (proc->state == PROC_RUNNABLE && proc->pid > 0 && proc != current_proc) {
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0 && proc != current_proc) { // 現在実行中のプロセスは除外
             next = proc;
             break;
         }
@@ -608,9 +608,10 @@ void yield(void) {
 
     // 現在実行中のプロセス以外に実行可能なプロセスがない場合，アイドルプロセスに切り替える
     if (next == current_proc){
+        printf("no runnable process found. switching to idle process.\n");
         return;
     }
-    printf("num_page(next. PID:%d) = %d\n",next->pid, num_page(next));
+    printf("PID:%d selected.\n",next->pid);
 
     // 次に動かすプロセスのカーネルスタックの初期値を，sscratch レジスタに設定
     // satp レジスタは，「どのページテーブルを使うか」を CPU に伝えるレジスタ
